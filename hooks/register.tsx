@@ -7,6 +7,9 @@ const PANE_ID = 'essential-conversation'
 const PANE_TITLE = 'Conversation'
 const COMMAND_NAME = 'conversation'
 const MAX_PAIRS = 50
+const STORE_KEY = 'pairs'
+// Markdown's own hard cap (claude-code.d.ts); past it the element is refused outright.
+const MAX_MARKDOWN_CHARS = 10000
 
 type Pair = {
   turnId: string
@@ -56,20 +59,52 @@ function pairsFromMessages(messages: readonly SessionMessage[]): Pair[] {
   })
 }
 
+type StoredPairs = {
+  sessionId: string
+  pairs: Pair[]
+}
+
+/**
+ * Validates `$.store.get(STORE_KEY)`'s `unknown` shape before trusting it as
+ * this session's own last-saved state, normalizing a `realId` an older
+ * version of this plugin may have stored without one.
+ */
+function parseStoredPairs(value: unknown): StoredPairs | null {
+  if (typeof value !== 'object' || value === null || !('sessionId' in value) || !('pairs' in value)) {
+    return null
+  }
+
+  const { sessionId, pairs } = value as { sessionId: unknown; pairs: unknown }
+
+  if (typeof sessionId !== 'string' || !Array.isArray(pairs)) {
+    return null
+  }
+
+  return {
+    sessionId,
+    pairs: (pairs as Pair[]).map(pair => ({ ...pair, realId: pair.realId ?? null })),
+  }
+}
+
 function answerTextOf(pair: Pair): string {
   if (pair.answer === null) {
     return '… generating a response'
   }
 
   const text = pair.answer === '' ? '(no response to show)' : pair.answer
+  const withStatus = pair.isAborted ? `${text}\n⏸ interrupted` : text
 
-  return pair.isAborted ? `${text}\n⏸ interrupted` : text
+  return withStatus.length > MAX_MARKDOWN_CHARS ? `${withStatus.slice(0, MAX_MARKDOWN_CHARS - 1)}…` : withStatus
 }
 
 export function register(on: On) {
   const pairs: Pair[] = []
   let invalidate: (() => void) | null = null
   let isPaneOpen = false
+  // Set once at session.start; the key persisted state is saved under, so a
+  // reload of this same running session can tell its own last save apart
+  // from another session's (a stale run, or /resume onto a different one).
+  let sessionId: string | null = null
 
   function pushPrompt(turnId: string, text: string) {
     pairs.push({ turnId, prompt: text, answer: null, isAborted: false, realId: null })
@@ -96,20 +131,44 @@ export function register(on: On) {
    * identical text. Only ever fires for a live turn's row; a history one is
    * never drawn, so it is never called for those (see Pair.realId).
    */
-  function learnRealId(text: string, requestId: string) {
+  function learnRealId(text: string, requestId: string): boolean {
     const pair = pairs.find(p => p.realId === null && p.prompt === text)
 
-    if (pair) {
-      pair.realId = requestId
-      invalidate?.()
+    if (!pair) {
+      return false
     }
+
+    pair.realId = requestId
+    invalidate?.()
+
+    return true
   }
 
   on('session.start', async ($, e, next) => {
     invalidate = () => $.ui.invalidate('ui.render')
+    sessionId = await $.session.id().catch(() => null)
 
-    const messages = await $.session.messages().catch((): SessionMessage[] => [])
-    pairs.push(...pairsFromMessages(messages))
+    // A hot reload of this plugin re-runs register() from scratch, wiping
+    // pairs and, worse, losing the real turnId of any turn still in
+    // flight — pairsFromMessages would then mint that same turn a fresh
+    // history-N id, and the turn.complete already on its way (carrying the
+    // original turnId) would never find it again. Restoring exactly what
+    // was last saved under this same sessionId keeps that turn's identity
+    // (and any realId already learned for other turns) intact across the
+    // reload; only a genuinely new or /resume'd session falls back to
+    // reconstructing from the transcript.
+    const stored = parseStoredPairs(await $.store.get(STORE_KEY).catch(() => undefined))
+
+    if (stored !== null && sessionId !== null && stored.sessionId === sessionId) {
+      pairs.push(...stored.pairs)
+    } else {
+      const messages = await $.session.messages().catch((): SessionMessage[] => [])
+      pairs.push(...pairsFromMessages(messages))
+    }
+
+    if (sessionId !== null) {
+      $.store.set(STORE_KEY, { sessionId, pairs }).catch(() => undefined)
+    }
 
     await $.command
       .register({
@@ -146,6 +205,10 @@ export function register(on: On) {
       // pane can sit scrolled to wherever it last was and the new card (and
       // later its answer) never comes into view on its own.
       $.ui.scroll({ to: 'end', in: PANE_ID }).catch(() => undefined)
+
+      if (sessionId !== null) {
+        $.store.set(STORE_KEY, { sessionId, pairs }).catch(() => undefined)
+      }
     }
 
     return next(e)
@@ -156,6 +219,10 @@ export function register(on: On) {
       setAnswer(e.turnId, e.answer, e.isAborted)
       invalidate?.()
       $.ui.scroll({ to: 'end', in: PANE_ID }).catch(() => undefined)
+
+      if (sessionId !== null) {
+        $.store.set(STORE_KEY, { sessionId, pairs }).catch(() => undefined)
+      }
     }
 
     return next(e)
@@ -166,7 +233,9 @@ export function register(on: On) {
   // a live prompt's jump button work. It does nothing for history: the
   // engine never raises this for a row session.start/`/resume` replayed.
   on('ui.render', { component: 'UserMessage' }, ($, e, next) => {
-    learnRealId(e.props.text, e.requestId)
+    if (learnRealId(e.props.text, e.requestId) && sessionId !== null) {
+      $.store.set(STORE_KEY, { sessionId, pairs }).catch(() => undefined)
+    }
 
     return next(e)
   })
@@ -210,6 +279,10 @@ export function register(on: On) {
     invalidate?.()
     $.ui.scroll({ to: 'end', in: PANE_ID }).catch(() => undefined)
 
+    if (sessionId !== null) {
+      $.store.set(STORE_KEY, { sessionId, pairs }).catch(() => undefined)
+    }
+
     return result
   })
 
@@ -218,7 +291,7 @@ export function register(on: On) {
       return next(e)
     }
 
-    const { Box, Text, Button } = $.ui.resolve(e)
+    const { Box, Text, Button, Markdown } = $.ui.resolve(e)
     // Oldest first, top to bottom — the same order the transcript itself reads in.
     const shown = pairs
 
@@ -257,7 +330,9 @@ export function register(on: On) {
                   </Button>
                 )}
               </Box>
-              <Text wrap="wrap">{answerTextOf(pair)}</Text>
+              <Box marginTop={1}>
+                <Markdown text={answerTextOf(pair)} />
+              </Box>
             </Box>
           )
         })}
