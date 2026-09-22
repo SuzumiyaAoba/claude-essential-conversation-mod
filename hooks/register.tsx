@@ -56,12 +56,12 @@ function pairsFromMessages(messages: readonly SessionMessage[]): Pair[] {
 
 function answerTextOf(pair: Pair): string {
   if (pair.answer === null) {
-    return '… 応答を生成中'
+    return '… generating a response'
   }
 
-  const text = pair.answer === '' ? '(表示できる応答はありません)' : pair.answer
+  const text = pair.answer === '' ? '(no response to show)' : pair.answer
 
-  return pair.isAborted ? `${text}\n⏸ 中断されました` : text
+  return pair.isAborted ? `${text}\n⏸ interrupted` : text
 }
 
 export function register(on: On) {
@@ -228,7 +228,7 @@ export function register(on: On) {
         .scroll({ to: { requestId }, block: 'start' })
         .then(result => {
           if (result.deny !== undefined) {
-            $.ui.log(`ジャンプできませんでした: ${result.deny}`)
+            $.ui.log(`Jump failed: ${result.deny}`)
           }
         })
         .catch(() => undefined)
