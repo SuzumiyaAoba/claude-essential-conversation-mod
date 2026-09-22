@@ -10,6 +10,8 @@ const MAX_PAIRS = 50
 const STORE_KEY = 'pairs'
 // Markdown's own hard cap (claude-code.d.ts); past it the element is refused outright.
 const MAX_MARKDOWN_CHARS = 10000
+// The same marker the transcript itself draws before an assistant block.
+const ANSWER_MARKER = '⏺ '
 
 type Pair = {
   turnId: string
@@ -88,13 +90,15 @@ function parseStoredPairs(value: unknown): StoredPairs | null {
 
 function answerTextOf(pair: Pair): string {
   if (pair.answer === null) {
-    return '… generating a response'
+    return `${ANSWER_MARKER}… generating a response`
   }
 
   const text = pair.answer === '' ? '(no response to show)' : pair.answer
   const withStatus = pair.isAborted ? `${text}\n⏸ interrupted` : text
+  const budget = MAX_MARKDOWN_CHARS - ANSWER_MARKER.length
+  const body = withStatus.length > budget ? `${withStatus.slice(0, budget - 1)}…` : withStatus
 
-  return withStatus.length > MAX_MARKDOWN_CHARS ? `${withStatus.slice(0, MAX_MARKDOWN_CHARS - 1)}…` : withStatus
+  return `${ANSWER_MARKER}${body}`
 }
 
 export function register(on: On) {
