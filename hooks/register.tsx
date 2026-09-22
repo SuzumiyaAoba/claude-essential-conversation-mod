@@ -30,6 +30,77 @@ type Pair = {
   realId: string | null
 }
 
+type PromptSegment =
+  | { type: 'text'; value: string }
+  | { type: 'pasted'; key: string; content: string }
+
+const PASTE_TOKEN = /<pasted_content id="[^"]*">|<\/pasted_content>/g
+
+/**
+ * Splits a prompt on `<pasted_content id="...">...</pasted_content>` spans
+ * (what the composer wraps a paste in) so each one can fold on its own,
+ * collapsed by default, instead of the whole prompt drawing as one wall of
+ * text. Depth-counted, not a lazy regex match: the pasted text itself can
+ * contain literal `<pasted_content>`-looking substrings (pasting a reply
+ * that quoted one), and only a real span's own matching close should end
+ * it. An unterminated span (an open with no matching close) falls back to
+ * the untouched prompt as one 'text' segment — nothing here is lost.
+ */
+function splitPastedContent(turnId: string, prompt: string): PromptSegment[] {
+  const segments: PromptSegment[] = []
+  let cursor = 0
+  let depth = 0
+  let blockStart = -1
+  let pasteIndex = 0
+  let match: RegExpExecArray | null
+
+  PASTE_TOKEN.lastIndex = 0
+
+  while ((match = PASTE_TOKEN.exec(prompt)) !== null) {
+    if (match[0].startsWith('<pasted_content')) {
+      if (depth === 0) {
+        if (match.index > cursor) {
+          segments.push({ type: 'text', value: prompt.slice(cursor, match.index) })
+        }
+
+        blockStart = match.index
+      }
+
+      depth += 1
+      continue
+    }
+
+    if (depth === 0) {
+      continue
+    }
+
+    depth -= 1
+
+    if (depth === 0) {
+      const openTagEnd = prompt.indexOf('>', blockStart) + 1
+      const blockEnd = match.index + match[0].length
+
+      segments.push({
+        type: 'pasted',
+        key: `${turnId}:${pasteIndex}`,
+        content: prompt.slice(openTagEnd, match.index),
+      })
+      pasteIndex += 1
+      cursor = blockEnd
+    }
+  }
+
+  if (depth !== 0) {
+    return [{ type: 'text', value: prompt }]
+  }
+
+  if (cursor < prompt.length) {
+    segments.push({ type: 'text', value: prompt.slice(cursor) })
+  }
+
+  return segments
+}
+
 /**
  * A transcript row that opens a turn: a typed user prompt, not a tool
  * result. Mirrors the built-in diff pane's own row test, since
@@ -109,6 +180,33 @@ export function register(on: On) {
   // reload of this same running session can tell its own last save apart
   // from another session's (a stale run, or /resume onto a different one).
   let sessionId: string | null = null
+  // A per-turnId fold state for the pane alone — purely a display
+  // preference, so it starts empty (every card open) each time the plugin
+  // (re)loads rather than being kept in $.store with the pairs themselves.
+  const collapsedTurnIds = new Set<string>()
+  // Same idea, one entry per pasted-content span (PromptSegment's key):
+  // collapsed (absent) by default, expanded once its own toggle is pressed.
+  const expandedPasteKeys = new Set<string>()
+
+  function toggleCollapsed(turnId: string) {
+    if (collapsedTurnIds.has(turnId)) {
+      collapsedTurnIds.delete(turnId)
+    } else {
+      collapsedTurnIds.add(turnId)
+    }
+
+    invalidate?.()
+  }
+
+  function togglePaste(key: string) {
+    if (expandedPasteKeys.has(key)) {
+      expandedPasteKeys.delete(key)
+    } else {
+      expandedPasteKeys.add(key)
+    }
+
+    invalidate?.()
+  }
 
   function pushPrompt(turnId: string, text: string) {
     pairs.push({ turnId, prompt: text, answer: null, isAborted: false, realId: null })
@@ -321,22 +419,53 @@ export function register(on: On) {
         {shown.length === 0 && <Text dimColor>No turns yet</Text>}
         {shown.map(pair => {
           const { realId } = pair
+          const isCollapsed = collapsedTurnIds.has(pair.turnId)
+          const promptSegments = splitPastedContent(pair.turnId, pair.prompt)
 
           return (
             <Box key={pair.turnId} flexDirection="column" marginTop={1} borderStyle="round" borderDimColor paddingX={1}>
               <Box flexDirection="row" justifyContent="space-between">
-                <Text bold color="cyan" wrap="wrap">
-                  ❯ {pair.prompt}
-                </Text>
+                <Button plain dimColor onPress={() => toggleCollapsed(pair.turnId)}>
+                  {isCollapsed ? '▸' : '▾'}
+                </Button>
                 {realId !== null && (
                   <Button plain dimColor onPress={() => jumpToRealId(realId)}>
                     ⤴ Jump to start
                   </Button>
                 )}
               </Box>
-              <Box marginTop={1}>
-                <Markdown text={answerTextOf(pair)} />
+              <Box flexDirection="column">
+                {promptSegments.map((segment, index) => {
+                  const prefix = index === 0 ? '❯ ' : ''
+
+                  if (segment.type === 'text') {
+                    return (
+                      <Text key={`${pair.turnId}:text:${index}`} bold color="cyan" wrap="wrap">
+                        {prefix}
+                        {segment.value}
+                      </Text>
+                    )
+                  }
+
+                  const isPasteOpen = expandedPasteKeys.has(segment.key)
+
+                  return (
+                    <Box key={segment.key} flexDirection="column">
+                      <Button plain dimColor onPress={() => togglePaste(segment.key)}>
+                        {prefix}
+                        {isPasteOpen ? '▾' : '▸'} pasted content ({segment.content.length} chars)
+                        {isPasteOpen ? '' : ' — click to expand'}
+                      </Button>
+                      {isPasteOpen && <Text wrap="wrap">{segment.content}</Text>}
+                    </Box>
+                  )
+                })}
               </Box>
+              {!isCollapsed && (
+                <Box marginTop={1}>
+                  <Markdown text={answerTextOf(pair)} />
+                </Box>
+              )}
             </Box>
           )
         })}
