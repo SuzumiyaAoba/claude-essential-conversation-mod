@@ -17,8 +17,10 @@ type Pair = {
    * The transcript's own id for this pair's opening UserMessage row, learned
    * from that row's own `ui.render` (its `requestId`) rather than guessed
    * from `turnId` — the only id `$.ui.scroll` accepts. Null until that row
-   * has been drawn at least once, true for a fresh `turn.start` and for a
-   * history one replayed into the transcript at session.start/`/resume`.
+   * has been drawn at least once: a live `turn.start` gets one, but a
+   * history-reconstructed pair (pairsFromMessages) never does — the engine
+   * raises no `ui.render` for a row replayed by session.start/`/resume`, so
+   * there is nothing here to learn it from.
    */
   realId: string | null
 }
@@ -88,10 +90,11 @@ export function register(on: On) {
 
   /**
    * Matches a drawn UserMessage row back to the pair it opened, by its exact
-   * text against the oldest pair still missing a `realId` — both this
-   * plugin's own history replay and the live transcript draw prompts in the
-   * same order, so the earliest unmatched match is the right one even when
-   * two turns share identical text.
+   * text against the oldest pair still missing a `realId` — the live
+   * transcript draws prompts in the same order `pairs` holds them, so the
+   * earliest unmatched match is the right one even when two turns share
+   * identical text. Only ever fires for a live turn's row; a history one is
+   * never drawn, so it is never called for those (see Pair.realId).
    */
   function learnRealId(text: string, requestId: string) {
     const pair = pairs.find(p => p.realId === null && p.prompt === text)
@@ -159,8 +162,9 @@ export function register(on: On) {
   })
 
   // Core's own row, not this plugin's — observing it here (rather than
-  // trusting turn.start's turnId to double as the message id) is what lets
-  // a history-replayed prompt get a real, scrollable id too.
+  // trusting turn.start's turnId to double as the message id) is what makes
+  // a live prompt's jump button work. It does nothing for history: the
+  // engine never raises this for a row session.start/`/resume` replayed.
   on('ui.render', { component: 'UserMessage' }, ($, e, next) => {
     learnRealId(e.props.text, e.requestId)
 
