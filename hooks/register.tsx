@@ -13,6 +13,14 @@ type Pair = {
   prompt: string
   answer: string | null
   isAborted: boolean
+  /**
+   * The transcript's own id for this pair's opening UserMessage row, learned
+   * from that row's own `ui.render` (its `requestId`) rather than guessed
+   * from `turnId` — the only id `$.ui.scroll` accepts. Null until that row
+   * has been drawn at least once, true for a fresh `turn.start` and for a
+   * history one replayed into the transcript at session.start/`/resume`.
+   */
+  realId: string | null
 }
 
 /**
@@ -41,6 +49,7 @@ function pairsFromMessages(messages: readonly SessionMessage[]): Pair[] {
       prompt: rows[0]?.text ?? '',
       answer: lastAnswer?.text ?? null,
       isAborted: false,
+      realId: null,
     }
   })
 }
@@ -61,7 +70,7 @@ export function register(on: On) {
   let isPaneOpen = false
 
   function pushPrompt(turnId: string, text: string) {
-    pairs.push({ turnId, prompt: text, answer: null, isAborted: false })
+    pairs.push({ turnId, prompt: text, answer: null, isAborted: false, realId: null })
 
     if (pairs.length > MAX_PAIRS) {
       pairs.splice(0, pairs.length - MAX_PAIRS)
@@ -74,6 +83,22 @@ export function register(on: On) {
     if (pair) {
       pair.answer = answer
       pair.isAborted = isAborted
+    }
+  }
+
+  /**
+   * Matches a drawn UserMessage row back to the pair it opened, by its exact
+   * text against the oldest pair still missing a `realId` — both this
+   * plugin's own history replay and the live transcript draw prompts in the
+   * same order, so the earliest unmatched match is the right one even when
+   * two turns share identical text.
+   */
+  function learnRealId(text: string, requestId: string) {
+    const pair = pairs.find(p => p.realId === null && p.prompt === text)
+
+    if (pair) {
+      pair.realId = requestId
+      invalidate?.()
     }
   }
 
@@ -90,6 +115,21 @@ export function register(on: On) {
       })
       .catch(() => undefined)
 
+    // Shown at once when there is room; too narrow, the engine holds it
+    // undrawn until /conversation (a person's own open is placed at any
+    // width) — see $.ui.open's PaneOpenArgs docs.
+    await $.ui
+      .open({ id: PANE_ID, title: PANE_TITLE, holdToasts: true })
+      .then(() => {
+        isPaneOpen = true
+        // Oldest-first puts prior history above the fold; start scrolled to
+        // the newest turn instead of wherever the pane happens to mount.
+        return $.ui.scroll({ to: 'end', in: PANE_ID })
+      })
+      .catch(() => undefined)
+
+    $.ui.log(`essential-conversation loaded — /${COMMAND_NAME} toggles the pane`)
+
     return next(e)
   })
 
@@ -99,6 +139,10 @@ export function register(on: On) {
     if (e.text !== '') {
       pushPrompt(e.turnId, e.text)
       invalidate?.()
+      // Oldest-first now puts a fresh card at the bottom; without this the
+      // pane can sit scrolled to wherever it last was and the new card (and
+      // later its answer) never comes into view on its own.
+      $.ui.scroll({ to: 'end', in: PANE_ID }).catch(() => undefined)
     }
 
     return next(e)
@@ -108,7 +152,17 @@ export function register(on: On) {
     if (e.agentId === undefined) {
       setAnswer(e.turnId, e.answer, e.isAborted)
       invalidate?.()
+      $.ui.scroll({ to: 'end', in: PANE_ID }).catch(() => undefined)
     }
+
+    return next(e)
+  })
+
+  // Core's own row, not this plugin's — observing it here (rather than
+  // trusting turn.start's turnId to double as the message id) is what lets
+  // a history-replayed prompt get a real, scrollable id too.
+  on('ui.render', { component: 'UserMessage' }, ($, e, next) => {
+    learnRealId(e.props.text, e.requestId)
 
     return next(e)
   })
@@ -150,31 +204,59 @@ export function register(on: On) {
     }
 
     invalidate?.()
+    $.ui.scroll({ to: 'end', in: PANE_ID }).catch(() => undefined)
 
     return result
   })
 
-  on('ui.render', { component: 'Pane' }, ($, e, next) => {
+  on('ui.render', { component: 'Pane' }, async ($, e, next) => {
     if (e.requestId !== PANE_ID) {
       return next(e)
     }
 
-    const { Box, Text } = $.ui.resolve(e)
-    // Newest first, so the latest exchange is visible without scrolling.
-    const shown = [...pairs].reverse()
+    const { Box, Text, Button } = $.ui.resolve(e)
+    // Oldest first, top to bottom — the same order the transcript itself reads in.
+    const shown = pairs
+
+    // Scrolls the main transcript to this pair's opening prompt. Only a
+    // person's own click/Enter reaches here — ui.scroll refuses a plugin-
+    // initiated jump on a transcript row — and only once learnRealId has
+    // matched this pair to its UserMessage row's own requestId; until then
+    // the button is left out rather than offering a jump that always fails.
+    function jumpToRealId(requestId: string) {
+      $.ui
+        .scroll({ to: { requestId }, block: 'start' })
+        .then(result => {
+          if (result.deny !== undefined) {
+            $.ui.log(`ジャンプできませんでした: ${result.deny}`)
+          }
+        })
+        .catch(() => undefined)
+    }
 
     return (
       <Box flexDirection="column" paddingRight={1}>
         <Text dimColor>{pairs.length} turn(s)</Text>
         {shown.length === 0 && <Text dimColor>No turns yet</Text>}
-        {shown.map(pair => (
-          <Box key={pair.turnId} flexDirection="column" marginTop={1} borderStyle="round" borderDimColor paddingX={1}>
-            <Text bold color="cyan" wrap="wrap">
-              ❯ {pair.prompt}
-            </Text>
-            <Text wrap="wrap">{answerTextOf(pair)}</Text>
-          </Box>
-        ))}
+        {shown.map(pair => {
+          const { realId } = pair
+
+          return (
+            <Box key={pair.turnId} flexDirection="column" marginTop={1} borderStyle="round" borderDimColor paddingX={1}>
+              <Box flexDirection="row" justifyContent="space-between">
+                <Text bold color="cyan" wrap="wrap">
+                  ❯ {pair.prompt}
+                </Text>
+                {realId !== null && (
+                  <Button plain dimColor onPress={() => jumpToRealId(realId)}>
+                    ⤴ Jump to start
+                  </Button>
+                )}
+              </Box>
+              <Text wrap="wrap">{answerTextOf(pair)}</Text>
+            </Box>
+          )
+        })}
       </Box>
     )
   })

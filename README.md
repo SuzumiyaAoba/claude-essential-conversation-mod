@@ -1,30 +1,32 @@
 # claude-essential-conversation
 
-Claude Code の [Mods](https://docs.claude.com/en/docs/claude-code/hooks) (function hooks) で書かれたプラグインです。
-各ターンでユーザーが入力したプロンプトと、そのターンにおける Claude Code の最後の回答のペアを、右側のサイドパネルに一覧表示します。
+A Claude Code plugin written with [Mods](https://docs.claude.com/en/docs/claude-code/hooks) (function hooks).
+It lists, in a side pane, the pair of each turn's typed prompt and Claude Code's last answer for that turn.
 
-> **Note**: Claude Mods (function hooks) は 2026年9月時点で Early Access の機能で、API は今後変更される可能性があります。
+> **Note**: Claude Mods (function hooks) are an Early Access feature as of September 2026; the API may still change.
 
-## 仕組み
+## How it works
 
-- `turn.start` イベントの `e.text`（そのターンのユーザープロンプト）と `turn.complete` イベントの `e.answer`（そのターンでの Claude の最終回答）を `turnId` で紐付けて記録します。
-- サブエージェントのターン（`e.agentId` を持つ `turn.complete`）は対象外にし、メインループのやり取りだけを表示します。
-- `session.start` 時に `$.session.messages()` から既存のトランスクリプトを読み、セッション再開時も過去のペアを復元します。
-- `/clear` でペアの一覧をリセットし、`/resume` では再開後のトランスクリプトから再構築します。
-- パネルは `$.ui.open` で開いた `Pane` で、フルスクリーンかつ十分な幅があるターミナルではトランスクリプトの右側にドッキングされ、狭い場合はプロンプト上のダイアログとして開きます（このプレースメントはエンジン側が自動で決定します）。
+- Pairs `e.text` from `turn.start` (that turn's prompt) with `e.answer` from `turn.complete` (that turn's final answer), joined by `turnId`.
+- Skips subagent turns (a `turn.complete` with `e.agentId` set) and tracks only the main loop's exchanges.
+- Reads the existing transcript from `$.session.messages()` at `session.start` so past pairs survive a fresh start and `/resume`.
+- `/clear` resets the pair list; `/resume` rebuilds it from the resumed transcript.
+- Cards render oldest first, top to bottom — the same order the transcript itself reads in. The pane auto-scrolls to the newest turn on `session.start`/`/resume` and whenever a turn starts or completes, so a fresh card (and later its answer) always comes into view.
+- Each card whose opening prompt the plugin has matched to a real transcript row shows a "⤴ Jump to start" button. Pressing it scrolls the main transcript back to that turn's prompt via `$.ui.scroll`. The match is learned by observing `ui.render` for `UserMessage` (its own `requestId`), not guessed from `turnId`, so it works for history-replayed turns too — a card gets the button only once its row has actually been drawn.
+- The pane is a `Pane` opened with `$.ui.open`: on a full-screen terminal wide enough, it docks to the right of the transcript; too narrow, it opens as a dialog over the prompt instead (the engine decides this placement automatically).
 
-## ファイル構成
+## File layout
 
 ```
-.claude-plugin/plugin.json   # プラグインのメタ情報
-hooks/hooks.json             # register.tsx をロードするための宣言
-hooks/register.tsx           # Mod 本体（イベント登録・パネル描画）
-tsconfig.json                 # /plugin-types が生成する型に対する開発用設定
+.claude-plugin/plugin.json   # Plugin metadata
+hooks/hooks.json             # Declares register.tsx to be loaded
+hooks/register.tsx           # The mod itself (event registration, pane rendering)
+tsconfig.json                 # Dev-time config for the types /plugin-types generates
 ```
 
-## 使い方
+## Usage
 
-1. Function hooks を有効化します（`~/.claude/settings.json` またはセッション起動時の環境変数）。
+1. Enable function hooks (via `~/.claude/settings.json` or an env var at session start).
 
    ```json
    {
@@ -34,23 +36,23 @@ tsconfig.json                 # /plugin-types が生成する型に対する開�
    }
    ```
 
-2. このディレクトリを plugin-dir として指定してセッションを起動します。
+2. Start a session with this directory as the plugin dir.
 
    ```bash
    CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude --plugin-dir .
    ```
 
-3. セッション内で `/conversation` を実行するとパネルの開閉をトグルできます。
+3. Run `/conversation` in the session to toggle the pane.
 
-## 開発
+## Development
 
-型定義を最新化する場合はセッション内で以下を実行してください（`.claude/types/claude-code.d.ts` が生成されます）。
+To refresh the type definitions, run the following inside a session (writes `.claude/types/claude-code.d.ts`):
 
 ```
 /plugin-types
 ```
 
-プラグインの静的検証:
+Static validation of the plugin:
 
 ```bash
 claude plugin validate .
