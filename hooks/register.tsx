@@ -34,17 +34,21 @@ type PromptSegment =
   | { type: 'text'; value: string }
   | { type: 'pasted'; key: string; content: string }
 
-const PASTE_TOKEN = /<pasted_content id="[^"]*">|<\/pasted_content>/g
+// The closing tag repeats `id="..."` too (`</pasted_content id="aedf">`,
+// not the bare `</pasted_content>` an XML reader would expect) — both
+// alternatives share this one shape, told apart below by the leading `/`.
+const PASTE_TOKEN = /<\/?pasted_content id="[^"]*">/g
 
 /**
- * Splits a prompt on `<pasted_content id="...">...</pasted_content>` spans
- * (what the composer wraps a paste in) so each one can fold on its own,
- * collapsed by default, instead of the whole prompt drawing as one wall of
- * text. Depth-counted, not a lazy regex match: the pasted text itself can
- * contain literal `<pasted_content>`-looking substrings (pasting a reply
- * that quoted one), and only a real span's own matching close should end
- * it. An unterminated span (an open with no matching close) falls back to
- * the untouched prompt as one 'text' segment — nothing here is lost.
+ * Splits a prompt on `<pasted_content id="...">...</pasted_content id="...">`
+ * spans (what the composer wraps a paste in) so each one can fold on its
+ * own, collapsed by default, instead of the whole prompt drawing as one
+ * wall of text. Depth-counted, not a lazy regex match: the pasted text
+ * itself can contain literal `<pasted_content>`-looking substrings (pasting
+ * a reply that quoted one), and only a real span's own matching close
+ * should end it. An unterminated span (an open with no matching close)
+ * falls back to the untouched prompt as one 'text' segment — nothing here
+ * is lost.
  */
 function splitPastedContent(turnId: string, prompt: string): PromptSegment[] {
   const segments: PromptSegment[] = []
@@ -54,13 +58,25 @@ function splitPastedContent(turnId: string, prompt: string): PromptSegment[] {
   let pasteIndex = 0
   let match: RegExpExecArray | null
 
+  // A run of plain text right against a paste's tags is mostly the
+  // composer's own framing newlines; trimmed, an all-whitespace run (e.g.
+  // between two adjacent pastes) drops out rather than drawing as a blank
+  // line above or below the paste's own box.
+  function pushText(value: string) {
+    const trimmed = value.trim()
+
+    if (trimmed !== '') {
+      segments.push({ type: 'text', value: trimmed })
+    }
+  }
+
   PASTE_TOKEN.lastIndex = 0
 
   while ((match = PASTE_TOKEN.exec(prompt)) !== null) {
-    if (match[0].startsWith('<pasted_content')) {
+    if (!match[0].startsWith('</')) {
       if (depth === 0) {
         if (match.index > cursor) {
-          segments.push({ type: 'text', value: prompt.slice(cursor, match.index) })
+          pushText(prompt.slice(cursor, match.index))
         }
 
         blockStart = match.index
@@ -83,7 +99,10 @@ function splitPastedContent(turnId: string, prompt: string): PromptSegment[] {
       segments.push({
         type: 'pasted',
         key: `${turnId}:${pasteIndex}`,
-        content: prompt.slice(openTagEnd, match.index),
+        // The composer wraps a paste in its own leading/trailing newline
+        // (`<pasted_content id="x">\ncontent\n</pasted_content ...>`), which
+        // read as blank lines above and below the text once drawn.
+        content: prompt.slice(openTagEnd, match.index).trim(),
       })
       pasteIndex += 1
       cursor = blockEnd
@@ -95,7 +114,7 @@ function splitPastedContent(turnId: string, prompt: string): PromptSegment[] {
   }
 
   if (cursor < prompt.length) {
-    segments.push({ type: 'text', value: prompt.slice(cursor) })
+    pushText(prompt.slice(cursor))
   }
 
   return segments
@@ -426,7 +445,7 @@ export function register(on: On) {
             <Box key={pair.turnId} flexDirection="column" marginTop={1} borderStyle="round" borderDimColor paddingX={1}>
               <Box flexDirection="row" justifyContent="space-between">
                 <Button plain dimColor onPress={() => toggleCollapsed(pair.turnId)}>
-                  {isCollapsed ? '▸' : '▾'}
+                  {isCollapsed ? '[+]' : '[-]'}
                 </Button>
                 {realId !== null && (
                   <Button plain dimColor onPress={() => jumpToRealId(realId)}>
@@ -449,14 +468,20 @@ export function register(on: On) {
 
                   const isPasteOpen = expandedPasteKeys.has(segment.key)
 
+                  const pasteLabel = `${prefix}${isPasteOpen ? '[-]' : '[+]'} pasted content (${segment.content.length} chars)${isPasteOpen ? '' : ' — click to expand'}`
+
                   return (
                     <Box key={segment.key} flexDirection="column">
                       <Button plain dimColor onPress={() => togglePaste(segment.key)}>
-                        {prefix}
-                        {isPasteOpen ? '▾' : '▸'} pasted content ({segment.content.length} chars)
-                        {isPasteOpen ? '' : ' — click to expand'}
+                        {pasteLabel}
                       </Button>
-                      {isPasteOpen && <Text wrap="wrap">{segment.content}</Text>}
+                      {isPasteOpen && (
+                        <Box borderStyle="round" borderDimColor paddingX={1}>
+                          <Text bold color="cyan" wrap="wrap">
+                            {segment.content}
+                          </Text>
+                        </Box>
+                      )}
                     </Box>
                   )
                 })}
