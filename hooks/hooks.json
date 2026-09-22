@@ -1,0 +1,4 @@
+{
+  "description": "Tracks each turn's prompt/answer pair via turn.start and turn.complete, and draws them in a Pane opened by /conversation.",
+  "modules": ["./register.tsx"]
+}

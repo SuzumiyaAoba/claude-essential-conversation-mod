@@ -1,0 +1,8 @@
+{
+  "name": "essential-conversation",
+  "version": "0.1.0",
+  "description": "Shows each turn's user prompt paired with Claude Code's last answer for that turn in a side pane (/conversation).",
+  "author": {
+    "name": "SuzumiyaAoba"
+  }
+}
